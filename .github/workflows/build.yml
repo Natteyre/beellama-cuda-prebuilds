@@ -29,25 +29,28 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           df -h /
 
-      # Install CUDA from Ubuntu apt repos — fast (~2-3 min), no NVIDIA account needed
-      - name: Install CUDA + build tools
+      # CUDA 11.5 (from apt) + GCC 10 — avoids GCC 11 std_function.h bug with nvcc
+      - name: Install CUDA + GCC 10 + build tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y nvidia-cuda-toolkit cmake build-essential
+          sudo apt-get install -y nvidia-cuda-toolkit g++-10 cmake build-essential
 
-      - name: Verify CUDA
+      - name: Verify
         run: |
           nvcc --version
-          nvidia-smi || echo "No GPU on runner (expected — we only compile)"
+          g++-10 --version | head -1
 
       - name: Clone beellama.cpp
         run: |
           git clone --depth 1 -b $BEE_REF https://github.com/Anbeeld/beellama.cpp.git beellama
 
-      - name: Build
+      - name: Build (GCC 10 for all compilers)
         run: |
           cd beellama
           cmake -B build \
+            -DCMAKE_C_COMPILER=/usr/bin/gcc-10 \
+            -DCMAKE_CXX_COMPILER=/usr/bin/g++-10 \
+            -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-10 \
             -DGGML_CUDA=ON \
             -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCH \
             -DCMAKE_BUILD_TYPE=Release \
@@ -60,7 +63,6 @@ jobs:
           cd beellama
           cp build/bin/llama-server ../dist/
           find build -name '*.so*' -exec cp -P {} ../dist/ \; 2>/dev/null || true
-          # CUDA runtime libs
           find /usr/lib/x86_64-linux-gnu -name 'libcudart*.so*' -exec cp -P {} ../dist/ \; 2>/dev/null || true
           find /usr/lib/x86_64-linux-gnu -name 'libcublas*.so*' -exec cp -P {} ../dist/ \; 2>/dev/null || true
           cd ..
