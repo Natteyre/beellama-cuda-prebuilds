@@ -9,10 +9,6 @@ on:
         description: 'beellama.cpp git ref (branch/tag/sha)'
         default: 'main'
         required: false
-      cuda_version:
-        description: 'CUDA toolkit version'
-        default: '12.4.1'
-        required: false
       cuda_arch:
         description: 'CUDA architecture (75=T4, 80=A100, 89=RTX4090)'
         default: '75'
@@ -20,12 +16,11 @@ on:
 
 env:
   BEE_REF: ${{ github.event.inputs.beellama_ref || 'main' }}
-  CUDA_VERSION: ${{ github.event.inputs.cuda_version || '12.4.1' }}
   CUDA_ARCH: ${{ github.event.inputs.cuda_arch || '75' }}
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
 
     steps:
@@ -34,15 +29,37 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           df -h /
 
-      - name: Install CUDA toolkit
+      - name: Check pre-installed CUDA
         run: |
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq cuda-toolkit-${CUDA_VERSION%%.*}-${CUDA_VERSION##*.} 2>&1 | tail -5
+          # ubuntu-22.04 runners have CUDA pre-installed
+          export PATH=/usr/local/cuda/bin:$PATH
+          export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+          nvcc --version || echo "nvcc not found in /usr/local/cuda"
+          ls /usr/local/cuda/lib64/libcudart* 2>/dev/null || echo "no cudart found"
+
+      - name: Install CUDA toolkit (if missing)
+        run: |
+          export PATH=/usr/local/cuda/bin:$PATH
+          if nvcc --version >/dev/null 2>&1; then
+            echo "CUDA already available, skipping install"
+          else
+            echo "Installing CUDA toolkit..."
+            wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+            sudo dpkg -i cuda-keyring_1.1-1_all.deb
+            sudo apt-get update -qq
+            sudo apt-get install -y cuda-toolkit-12-4
+          fi
+
+      - name: Set CUDA env
+        run: |
           echo "/usr/local/cuda/bin" >> $GITHUB_PATH
           echo "LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-          nvcc --version
+          # Verify
+          /usr/local/cuda/bin/nvcc --version
+
+      - name: Install cmake + build tools
+        run: |
+          sudo apt-get install -y -qq cmake build-essential
 
       - name: Clone beellama.cpp
         run: |
@@ -66,20 +83,19 @@ jobs:
           # Main binary
           cp build/bin/llama-server ../dist/
 
-          # Shared libraries from build tree
+          # Shared libraries from build tree (ggml, llama)
           find build -name '*.so*' -exec cp -P {} ../dist/ \; 2>/dev/null || true
 
-          # CUDA runtime libs (cudart, cublas, cuDNN) — needed by Colab
+          # CUDA runtime libs (needed by Colab)
           for lib in libcudart libcublas libcublasLt libcudnn; do
             find /usr/local/cuda/lib64 -name "${lib}*.so*" -exec cp -P {} ../dist/ \; 2>/dev/null || true
           done
 
           cd ..
+          echo "--- Package contents ---"
           ls -lh dist/
+          echo "--- Tarball ---"
           tar czf beellama-cuda-sm${CUDA_ARCH}.tar.gz dist/
-          echo "--- Tarball contents ---"
-          tar tzf beellama-cuda-sm${CUDA_ARCH}.tar.gz | head -30
-          echo "--- Tarball size ---"
           ls -lh beellama-cuda-sm${CUDA_ARCH}.tar.gz
 
       - name: Upload release asset
@@ -90,7 +106,6 @@ jobs:
           append_body: true
           body: |
             ## beellama.cpp CUDA sm_${{ env.CUDA_ARCH }} prebuilt
-            - CUDA ${{ env.CUDA_VERSION }} / sm_${{ env.CUDA_ARCH }}
-            - Built from [beellama.cpp](${{ github.server_url }}/Anbeeld/beellama.cpp) ref: `${{ env.BEE_REF }}`
+            - Built from [beellama.cpp](https://github.com/Anbeeld/beellama.cpp) ref: `${{ env.BEE_REF }}`
             - Includes: llama-server, libllama.so, libggml*.so, CUDA runtime libs
-            - For use with Colab T4 (sm_75): `curl -fL ... | tar xzf -`
+            - For Colab T4 (sm_75): `curl -fL <this_url> | tar xzf -`
