@@ -1,0 +1,96 @@
+name: Build beellama CUDA sm_75
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      beellama_ref:
+        description: 'beellama.cpp git ref (branch/tag/sha)'
+        default: 'main'
+        required: false
+      cuda_version:
+        description: 'CUDA toolkit version'
+        default: '12.4.1'
+        required: false
+      cuda_arch:
+        description: 'CUDA architecture (75=T4, 80=A100, 89=RTX4090)'
+        default: '75'
+        required: false
+
+env:
+  BEE_REF: ${{ github.event.inputs.beellama_ref || 'main' }}
+  CUDA_VERSION: ${{ github.event.inputs.cuda_version || '12.4.1' }}
+  CUDA_ARCH: ${{ github.event.inputs.cuda_arch || '75' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
+
+      - name: Install CUDA toolkit
+        run: |
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cuda-toolkit-${CUDA_VERSION%%.*}-${CUDA_VERSION##*.} 2>&1 | tail -5
+          echo "/usr/local/cuda/bin" >> $GITHUB_PATH
+          echo "LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          nvcc --version
+
+      - name: Clone beellama.cpp
+        run: |
+          git clone --depth 1 -b $BEE_REF https://github.com/Anbeeld/beellama.cpp.git beellama
+
+      - name: Build
+        run: |
+          cd beellama
+          cmake -B build \
+            -DGGML_CUDA=ON \
+            -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCH \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLAMA_CURL=OFF
+          cmake --build build --config Release -j$(nproc)
+
+      - name: Package
+        run: |
+          mkdir dist
+          cd beellama
+
+          # Main binary
+          cp build/bin/llama-server ../dist/
+
+          # Shared libraries from build tree
+          find build -name '*.so*' -exec cp -P {} ../dist/ \; 2>/dev/null || true
+
+          # CUDA runtime libs (cudart, cublas, cuDNN) — needed by Colab
+          for lib in libcudart libcublas libcublasLt libcudnn; do
+            find /usr/local/cuda/lib64 -name "${lib}*.so*" -exec cp -P {} ../dist/ \; 2>/dev/null || true
+          done
+
+          cd ..
+          ls -lh dist/
+          tar czf beellama-cuda-sm${CUDA_ARCH}.tar.gz dist/
+          echo "--- Tarball contents ---"
+          tar tzf beellama-cuda-sm${CUDA_ARCH}.tar.gz | head -30
+          echo "--- Tarball size ---"
+          ls -lh beellama-cuda-sm${CUDA_ARCH}.tar.gz
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: beellama-cuda-sm${{ env.CUDA_ARCH }}.tar.gz
+          append_body: true
+          body: |
+            ## beellama.cpp CUDA sm_${{ env.CUDA_ARCH }} prebuilt
+            - CUDA ${{ env.CUDA_VERSION }} / sm_${{ env.CUDA_ARCH }}
+            - Built from [beellama.cpp](${{ github.server_url }}/Anbeeld/beellama.cpp) ref: `${{ env.BEE_REF }}`
+            - Includes: llama-server, libllama.so, libggml*.so, CUDA runtime libs
+            - For use with Colab T4 (sm_75): `curl -fL ... | tar xzf -`
