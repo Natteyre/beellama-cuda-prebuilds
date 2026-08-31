@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       beellama_ref:
-        description: 'beellama.cpp git ref (branch/tag/sha)'
+        description: 'beellama.cpp git ref'
         default: 'main'
         required: false
       cuda_arch:
@@ -29,18 +29,16 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           df -h /
 
-      # ubuntu-22.04 runners have CUDA 12.x pre-installed at /usr/local/cuda
-      - name: Verify CUDA
-        run: |
-          /usr/local/cuda/bin/nvcc --version
-          echo "CUDA_PATH=/usr/local/cuda" >> $GITHUB_ENV
-          echo "/usr/local/cuda/bin" >> $GITHUB_PATH
-          echo "LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH" >> $GITHUB_ENV
-
-      - name: Install cmake
+      # Install CUDA from Ubuntu apt repos — fast (~2-3 min), no NVIDIA account needed
+      - name: Install CUDA + build tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y cmake build-essential
+          sudo apt-get install -y nvidia-cuda-toolkit cmake build-essential
+
+      - name: Verify CUDA
+        run: |
+          nvcc --version
+          nvidia-smi || echo "No GPU on runner (expected — we only compile)"
 
       - name: Clone beellama.cpp
         run: |
@@ -53,23 +51,18 @@ jobs:
             -DGGML_CUDA=ON \
             -DCMAKE_CUDA_ARCHITECTURES=$CUDA_ARCH \
             -DCMAKE_BUILD_TYPE=Release \
-            -DLLAMA_CURL=OFF \
-            -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
+            -DLLAMA_CURL=OFF
           cmake --build build --config Release -j$(nproc)
 
       - name: Package
         run: |
           mkdir dist
           cd beellama
-
           cp build/bin/llama-server ../dist/
           find build -name '*.so*' -exec cp -P {} ../dist/ \; 2>/dev/null || true
-
           # CUDA runtime libs
-          for lib in libcudart libcublas libcublasLt libcudnn; do
-            find /usr/local/cuda/lib64 -name "${lib}*.so*" -exec cp -P {} ../dist/ \; 2>/dev/null || true
-          done
-
+          find /usr/lib/x86_64-linux-gnu -name 'libcudart*.so*' -exec cp -P {} ../dist/ \; 2>/dev/null || true
+          find /usr/lib/x86_64-linux-gnu -name 'libcublas*.so*' -exec cp -P {} ../dist/ \; 2>/dev/null || true
           cd ..
           ls -lh dist/
           tar czf beellama-cuda-sm${CUDA_ARCH}.tar.gz dist/
@@ -84,4 +77,4 @@ jobs:
           body: |
             ## beellama.cpp CUDA sm_${{ env.CUDA_ARCH }} prebuilt
             - Built from [beellama.cpp](https://github.com/Anbeeld/beellama.cpp) ref: `${{ env.BEE_REF }}`
-            - For Colab T4 (sm_75): `curl -fL <url> | tar xzf -`
+            - For Colab T4: `curl -fL <url> | tar xzf -`
